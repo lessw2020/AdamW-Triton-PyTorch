@@ -95,7 +95,7 @@ class TritonAdamW(Optimizer):
                 grid = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
 
                 adamw_kernel[grid, BLOCK_SIZE](
-                    p,
+                    p.data,
                     p.grad,
                     state["exp_avg"],
                     state["exp_avg_sq"],

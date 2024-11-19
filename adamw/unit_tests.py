@@ -1,8 +1,9 @@
- import torch
+import torch
 import torch.nn as nn
 import numpy as np
 from torch.optim import AdamW as TorchAdamW
 import pytest
+from triton_adamw import TritonAdamW
 
 class SimpleModel(nn.Module):
     def __init__(self):
@@ -17,8 +18,8 @@ class SimpleModel(nn.Module):
 
 def generate_dummy_data(batch_size=32, input_dim=10):
     """Generate dummy data for testing"""
-    X = torch.randn(batch_size, input_dim)
-    y = torch.randn(batch_size, 1)
+    X = torch.randn(batch_size, input_dim, device='cuda')
+    y = torch.randn(batch_size, 1, device='cuda')
     return X, y
 
 def get_parameter_snapshot(model):
@@ -37,7 +38,7 @@ def compare_parameters(params1, params2, rtol=1e-5, atol=1e-7):
 
 def test_adamw_implementations():
     # Set random seed for reproducibility
-    torch.manual_seed(42)
+    torch.manual_seed(2020)
     
     # Test configurations
     test_configs = [
@@ -53,6 +54,10 @@ def test_adamw_implementations():
         
         # Initialize with same parameters
         model_triton.load_state_dict(model_torch.state_dict())
+
+        # ensure all on gpu
+        model_torch.cuda()
+        model_triton.cuda()
         
         # Create optimizers
         optim_torch = TorchAdamW(model_torch.parameters(), **config)
@@ -64,6 +69,7 @@ def test_adamw_implementations():
         
         for step in range(n_steps):
             X, y = generate_dummy_data()
+            
             
             # Forward pass - PyTorch
             output_torch = model_torch(X)
@@ -105,6 +111,7 @@ def test_adamw_implementations():
 def test_edge_cases():
     """Test edge cases and corner cases"""
     model = SimpleModel()
+    model.to('cuda')
     
     # Test with zero learning rate
     optim = TritonAdamW(model.parameters(), lr=0.0)
