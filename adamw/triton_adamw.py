@@ -1,4 +1,4 @@
-import torch
+ import torch
 import triton
 import triton.language as tl
 from torch.optim import Optimizer
@@ -34,22 +34,23 @@ def adamw_kernel(
 
     # Update biased first moment estimate
     exp_avg = beta1 * exp_avg + (1 - beta1) * grads
+    
     # Update biased second raw moment estimate
     exp_avg_sq = beta2 * exp_avg_sq + (1 - beta2) * (grads * grads)
 
-    # Compute bias-corrected first moment estimate
-    step_size = lr / bias_correction1
+    # Compute bias-corrected estimates
     exp_avg_corrected = exp_avg / bias_correction1
     exp_avg_sq_corrected = exp_avg_sq / bias_correction2
-
-    # Compute the denominator
+    
+    # Compute denominator with numerical stability
     denom = tl.sqrt(exp_avg_sq_corrected) + eps
-
-    # Update parameters
-    # First apply weight decay
-    params = params * (1 - lr * weight_decay)
-    # Then apply the Adam update
-    params = params - step_size * (exp_avg_corrected / denom)
+    
+    # Compute the Adam update
+    update = exp_avg_corrected / denom
+    
+    # Apply weight decay and learning rate scaling
+    # Note: Weight decay is now correctly applied as an update rather than a direct multiplication
+    params = params - lr * (update + weight_decay * params)
 
     # Store updated values
     tl.store(params_ptr + offsets, params, mask=mask)
@@ -57,16 +58,6 @@ def adamw_kernel(
     tl.store(exp_avg_sq_ptr + offsets, exp_avg_sq, mask=mask)
 
 class TritonAdamW(Optimizer):
-    """
-    Implements AdamW optimizer using Triton kernel.
-    
-    Arguments:
-        params (iterable): iterable of parameters to optimize or dicts defining parameter groups
-        lr (float, optional): learning rate (default: 1e-3)
-        betas (Tuple[float, float], optional): coefficients used for computing running averages of gradient and its square (default: (0.9, 0.999))
-        eps (float, optional): term added to the denominator to improve numerical stability (default: 1e-8)
-        weight_decay (float, optional): weight decay coefficient (default: 0.01)
-    """
     def __init__(
         self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01
     ):
@@ -86,11 +77,6 @@ class TritonAdamW(Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-        """Performs a single optimization step.
-
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model and returns the loss.
-        """
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -103,20 +89,32 @@ class TritonAdamW(Optimizer):
                 if p.grad is None:
                     continue
                 
-                # Skip if grad is not contiguous
-                if not p.grad.is_contiguous():
-                    p.grad = p.grad.contiguous()
-                
                 grad = p.grad
+                
+                # Ensure data is contiguous and on the correct device
+                if not p.is_contiguous():
+                    p.data = p.data.contiguous()
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                
                 state = self.state[p]
 
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
                     # Exponential moving average of gradient values
-                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["exp_avg"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format, device=p.device
+                    )
                     # Exponential moving average of squared gradient values
-                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["exp_avg_sq"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format, device=p.device
+                    )
+
+                # Ensure all tensors are on the same device
+                for key in ["exp_avg", "exp_avg_sq"]:
+                    if state[key].device != p.device:
+                        state[key] = state[key].to(p.device)
 
                 # Update step count
                 state["step"] += 1
@@ -126,8 +124,9 @@ class TritonAdamW(Optimizer):
                 bias_correction2 = 1 - beta2 ** state["step"]
 
                 # Determine grid and block size for kernel launch
-                BLOCK_SIZE = 1024 # min(1024, p.numel())  
+                # Adjust block size based on tensor size for better performance
                 n_elements = p.numel()
+                BLOCK_SIZE = min(1024, triton.next_power_of_2(n_elements))
                 grid = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
 
                 # Launch kernel
