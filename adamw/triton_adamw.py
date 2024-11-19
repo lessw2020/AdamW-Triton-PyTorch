@@ -58,7 +58,7 @@ def adamw_kernel(
 
 class TritonAdamW(Optimizer):
     """
-    Implements AdamW algorithm using Triton kernels.
+    Implements AdamW optimizer using Triton kernel.
     
     Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining parameter groups
@@ -126,7 +126,7 @@ class TritonAdamW(Optimizer):
                 bias_correction2 = 1 - beta2 ** state["step"]
 
                 # Determine grid and block size for kernel launch
-                BLOCK_SIZE = min(1024, p.numel())  # Adjust block size based on tensor size
+                BLOCK_SIZE = 1024 # min(1024, p.numel())  
                 n_elements = p.numel()
                 grid = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
 

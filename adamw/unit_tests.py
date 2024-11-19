@@ -42,9 +42,9 @@ def test_adamw_implementations():
     
     # Test configurations
     test_configs = [
-        {'lr': 1e-3, 'betas': (0.9, 0.999), 'eps': 1e-8, 'weight_decay': 0.01},
+        {'lr': 1e-1, 'betas': (0.9, 0.999), 'eps': 1e-8, 'weight_decay': 0.01},
         {'lr': 1e-2, 'betas': (0.95, 0.999), 'eps': 1e-6, 'weight_decay': 0.1},
-        {'lr': 1e-4, 'betas': (0.8, 0.9), 'eps': 1e-7, 'weight_decay': 0.001},
+        {'lr': 1e-3, 'betas': (0.8, 0.9), 'eps': 1e-7, 'weight_decay': 0.001},
     ]
     
     for config in test_configs:
