@@ -18,6 +18,7 @@ def adamw_kernel(
     bias_correction1,
     bias_correction2,
     n_elements,
+    is_bias,  # New parameter to indicate if the tensor is a bias
     BLOCK_SIZE: tl.constexpr,
 ):
     # Calculate the starting offset for this program instance
@@ -48,9 +49,12 @@ def adamw_kernel(
     # Compute the Adam update
     update = exp_avg_corrected / denom
     
-    # Apply weight decay and learning rate scaling
-    # Note: Weight decay is now correctly applied as an update rather than a direct multiplication
-    params = params - lr * (update + weight_decay * params)
+    # Apply weight decay only if not a bias parameter
+    if not is_bias:
+        update = update + weight_decay * params
+        
+    # Apply final update with learning rate
+    params = params - lr * update
 
     # Store updated values
     tl.store(params_ptr + offsets, params, mask=mask)
@@ -74,6 +78,14 @@ class TritonAdamW(Optimizer):
 
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
+
+    @staticmethod
+    def _is_bias(param_name, param):
+        """
+        Determine if a parameter is a bias.
+        This checks both the name and shape of the parameter.
+        """
+        return (param_name and 'bias' in param_name.lower()) or (len(param.shape) == 1)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -110,6 +122,10 @@ class TritonAdamW(Optimizer):
                     state["exp_avg_sq"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format, device=p.device
                     )
+                    # Store whether this is a bias parameter
+                    param_state = [name for name, param in p.named_parameters()] if hasattr(p, 'named_parameters') else []
+                    param_name = param_state[0] if param_state else None
+                    state["is_bias"] = self._is_bias(param_name, p)
 
                 # Ensure all tensors are on the same device
                 for key in ["exp_avg", "exp_avg_sq"]:
@@ -124,7 +140,6 @@ class TritonAdamW(Optimizer):
                 bias_correction2 = 1 - beta2 ** state["step"]
 
                 # Determine grid and block size for kernel launch
-                # Adjust block size based on tensor size for better performance
                 n_elements = p.numel()
                 BLOCK_SIZE = min(1024, triton.next_power_of_2(n_elements))
                 grid = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -144,6 +159,7 @@ class TritonAdamW(Optimizer):
                     bias_correction1,
                     bias_correction2,
                     n_elements,
+                    state["is_bias"],  # Pass the bias flag to the kernel
                     BLOCK_SIZE=BLOCK_SIZE,
                 )
 
