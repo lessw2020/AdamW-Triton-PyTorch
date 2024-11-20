@@ -3,6 +3,15 @@ import triton
 import triton.language as tl
 from torch.optim import Optimizer
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 256}, num_warps=8),
+        triton.Config({'BLOCK_SIZE': 512}, num_warps=16),
+        triton.Config({'BLOCK_SIZE': 1024}, num_warps=32),
+    ],
+    key=['n_elements'],
+)
 @triton.jit
 def adamw_kernel(
     params_ptr,
@@ -18,8 +27,9 @@ def adamw_kernel(
     bias_correction1,
     bias_correction2,
     n_elements,
-    is_bias,  # New parameter to indicate if the tensor is a bias
+    is_bias,
     BLOCK_SIZE: tl.constexpr,
+    NUM_WARPS: tl.constexpr,
 ):
     # Calculate the starting offset for this program instance
     pid = tl.program_id(0)
@@ -27,7 +37,7 @@ def adamw_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
-    # Load parameters and states
+    # Load parameters and states with block pointer arithmetic
     params = tl.load(params_ptr + offsets, mask=mask)
     grads = tl.load(grads_ptr + offsets, mask=mask)
     exp_avg = tl.load(exp_avg_ptr + offsets, mask=mask)
@@ -78,6 +88,9 @@ class TritonAdamW(Optimizer):
 
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
+        
+        # Initialize cache for autotuned configs
+        self._kernel_configs = {}
 
     @staticmethod
     def _is_bias(param_name, param):
@@ -86,6 +99,22 @@ class TritonAdamW(Optimizer):
         This checks both the name and shape of the parameter.
         """
         return (param_name and 'bias' in param_name.lower()) or (len(param.shape) == 1)
+
+    def _get_kernel_config(self, n_elements):
+        """
+        Get or create cached kernel configuration for given tensor size.
+        """
+        if n_elements not in self._kernel_configs:
+            # Run a warmup iteration to trigger autotuning
+            dummy_input = torch.zeros(n_elements, device='cuda')
+            grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+            
+            self._kernel_configs[n_elements] = adamw_kernel.warmup(
+                dummy_input, dummy_input, dummy_input, dummy_input,
+                1e-3, 0.9, 0.999, 1e-8, 0.01, 1, 1.0, 1.0, n_elements, False,
+                grid=grid
+            )
+        return self._kernel_configs[n_elements]
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -139,13 +168,13 @@ class TritonAdamW(Optimizer):
                 bias_correction1 = 1 - beta1 ** state["step"]
                 bias_correction2 = 1 - beta2 ** state["step"]
 
-                # Determine grid and block size for kernel launch
+                # Get number of elements and kernel config
                 n_elements = p.numel()
-                BLOCK_SIZE = min(1024, triton.next_power_of_2(n_elements))
-                grid = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
-
-                # Launch kernel
-                adamw_kernel[grid, BLOCK_SIZE](
+                kernel_config = self._get_kernel_config(n_elements)
+                
+                # Launch kernel with autotuned configuration
+                grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+                adamw_kernel[grid](
                     p.data,
                     grad,
                     state["exp_avg"],
@@ -159,8 +188,7 @@ class TritonAdamW(Optimizer):
                     bias_correction1,
                     bias_correction2,
                     n_elements,
-                    state["is_bias"],  # Pass the bias flag to the kernel
-                    BLOCK_SIZE=BLOCK_SIZE,
+                    state["is_bias"],
                 )
 
         return loss
