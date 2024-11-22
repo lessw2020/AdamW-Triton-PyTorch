@@ -163,11 +163,14 @@ class TritonAdamW(Optimizer):
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
+                    if not use_fp8:
+                        state["exp_avg"] = torch.zeros_like(
+                            p,  # memory_format=torch.preserve_format
+                        )
+                    else:
+                        state["exp_avg"] = torch.zeros_like(p, dtype=torch.uint8)
                     state["exp_avg_sq"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
+                        p,  # memory_format=torch.preserve_format
                     )
                     state["scale"] = torch.ones(1, device=p.device)  # For FP8
 

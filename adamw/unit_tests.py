@@ -53,6 +53,7 @@ def get_optimizer_memory_usage(optimizer):
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         total_bytes += v.element_size() * v.nelement()
+    # print(f"Optimizer memory usage: {total_bytes / 1e6:.2f} MB")
     return total_bytes
 
 
@@ -92,12 +93,6 @@ def test_adamw_implementations():
             # Training loop
             n_steps = 10
             results = []
-
-            # Store initial memory usage - with safety check
-            initial_torch_memory = max(
-                1, get_optimizer_memory_usage(optim_torch)
-            )  # Avoid division by zero
-            initial_triton_memory = max(1, get_optimizer_memory_usage(optim_triton))
 
             for step in range(n_steps):
                 X, y = generate_dummy_data(hidden_size=hidden_size)
@@ -141,6 +136,7 @@ def test_adamw_implementations():
                 # Get current memory usage
                 torch_memory = get_optimizer_memory_usage(optim_torch)
                 triton_memory = get_optimizer_memory_usage(optim_triton)
+                # print(f"Total memory usage: {torch_memory=},  {triton_memory=} bytes")
 
                 results.append(
                     {
@@ -181,13 +177,9 @@ def test_adamw_implementations():
 
             # Memory analysis with safety checks
             if (
-                use_fp8 and initial_torch_memory > 0
+                use_fp8  # and initial_torch_memory > 0
             ):  # Only compare if we have valid initial memory
-                memory_reduction = (
-                    (initial_torch_memory - initial_triton_memory)
-                    / initial_torch_memory
-                    * 100
-                )
+                memory_reduction = (torch_memory - triton_memory) / torch_memory * 100
                 print(f"Memory reduction with FP8: {memory_reduction:.1f}%")
                 # Verify memory savings with FP8
                 # assert memory_reduction > 0, "FP8 should reduce memory usage"
